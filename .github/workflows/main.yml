@@ -1,0 +1,88 @@
+name: PPSP5 build
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Build type
+        type: choice
+        default: NormalOptimized
+        options: [NormalOptimized, NormalDebug]
+      abis:
+        description: Phone types (arm64-only builds about twice as fast)
+        type: choice
+        default: both
+        options: [both, arm64-only]
+      ref:
+        description: PPSSPP branch or tag to build
+        type: string
+        default: master
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift || true
+      - name: Get PPSSPP
+        uses: actions/checkout@v4
+        with:
+          repository: hrydgard/ppsspp
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+          fetch-depth: 0
+          path: ppsspp
+      - name: Get the PPSP5 kit
+        uses: actions/checkout@v4
+        with:
+          path: kit
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Apply PPSP5
+        env:
+          PPSP5_ABIS: ${{ inputs.abis }}
+        run: |
+          ZIP=kit/ppsp5-overlay.zip
+          [ -f "$ZIP" ] || ZIP=$(ls kit/ppsp5-overlay*.zip 2>/dev/null | head -n 1 || true)
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
+            echo "::error::ppsp5-overlay.zip is not in this repository. Upload it with Add file > Upload files."
+            exit 1
+          fi
+          cd ppsspp
+          unzip -q -o "../$ZIP"
+          python3 ppsp5/apply.py
+          if [ -f gradlew ]; then echo "GDIR=ppsspp" >> "$GITHUB_ENV"; else echo "GDIR=ppsspp/android" >> "$GITHUB_ENV"; fi
+      - name: Quick compile check
+        run: |
+          cd "$GDIR"
+          chmod +x gradlew
+          ./gradlew compileNormalOptimizedJavaWithJavac --stacktrace -Dorg.gradle.jvmargs=-Xmx4g
+      - name: Build the APK
+        run: |
+          cd "$GDIR"
+          ./gradlew assemble${{ inputs.variant }} --stacktrace -Dorg.gradle.jvmargs=-Xmx4g
+      - name: Collect the APK
+        id: collect
+        run: |
+          mkdir -p out
+          find ppsspp -path "*/outputs/apk/*" -name "*.apk" | while read -r f; do
+            cp "$f" "out/PPSP5-build${{ github.run_number }}-$(basename "$f")"
+          done
+          ls -la out
+          ls out/*.apk
+          echo "sha=$(git -C ppsspp rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "APK ready: open this repository's Releases page and tap the newest PPSP5 build." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PPSP5-apk
+          path: out/*.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ppsp5-build-${{ github.run_number }}
+          name: PPSP5 build ${{ github.run_number }}
+          body: Built from hrydgard/ppsspp @ ${{ steps.collect.outputs.sha }} plus the PPSP5 overlay in this repository. Free software, GPL v2 or later.
+          prerelease: true
+          files: out/*.apk
